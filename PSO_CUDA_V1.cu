@@ -1,198 +1,179 @@
+#include <curand_kernel.h>
+#include <cuda_runtime.h>
 #include <iostream>
-#include <stdlib.h>
-#include <cmath>
-#include <string>
-#include <ctime>
-//#include <cuda.h>
-//#include <cuda_runtime.h>
-//#include <curand_kernel.h>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-
-const unsigned int particulas = 10000;
-const unsigned int ITERATIONS = 1000;
-const float SEARCH_MIN = -5.12f;
-const float SEARCH_MAX = 5.12f;
+const unsigned int parts_qty = 1000;
+const unsigned int iterations = 1000;
+const float min_range_value = -5.12f;
+const float max_range_value = 5.12f;
 const float w = 0.7f;
-const float c_ind = 1.5f;
-const float c_team = 1.5f;
+const float c1 = 1.5f;
+const float c2 = 1.5f;
 
+struct Particle {
+    float* current_position_inx; 
+    float* current_position_iny;
 
-struct Position {
-    float x, y;
-    std::string toString() {
-        return "(" + std::to_string(x) + "," + std::to_string(y) + ")";
-    }
-    __device__ __host__ void operator+=(const Position& a) {
-        x = x + a.x;
-        y = y + a.y;
-    }
-    __device__ __host__ void operator=(const Position& a) {
-        x = a.x;
-        y = a.y;
-    }
+    float* best_position_inx; 
+    float* best_position_iny;
+
+    float* velocity_inx;
+    float* velocity_iny;
+
+    float* current_value;
+    float* pBest;
 };
 
+__global__ void initializeRandomPositions(float* position_x, 
+                                            float* position_y, 
+                                            float* velocity_x, 
+                                            float* velocity_y,
+                                            float* personal_best_x,
+                                            float* personal_best_y, 
+                                            int seed, float minVal, 
+                                            float maxVal, int N) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
+    curandState state;
+    curand_init(seed, tid, 0, &state);
 
+    float randomValue1 = minVal + (maxVal - minVal) * curand_uniform(&state);
+    float randomValue2 = minVal + (maxVal - minVal) * curand_uniform(&state);
+    float randomValue3 = minVal + (maxVal - minVal) * curand_uniform(&state);
+    float randomValue4 = minVal + (maxVal - minVal) * curand_uniform(&state);
 
-struct Particula {
-    Position best_position;
-    Position current_position;
-    Position velocity;
-    float best_value;
-};
-
-
-
-
-float randomFloat(float low, float high) {
-    float range = high-low;
-    float pct = static_cast <float>(rand()) / static_cast <float>(RAND_MAX);
-    return low + pct * range;
+    if (tid < N) { 
+        position_x[tid] = randomValue1;
+        personal_best_x[tid] = randomValue1;
+        position_y[tid] = randomValue2;
+        personal_best_y[tid] = randomValue2;
+        velocity_x[tid] = randomValue3;
+        velocity_y[tid] = randomValue4;
+    }
 }
 
-
-__device__ __host__ float calcValue(Position p) {
-
-
-    return (p.x * p.x - 10 * cosf(2 * M_PI * p.x)) + (p.y * p.y - 10 * cosf(2 * M_PI * p.y));
+__global__ void evalFunct(float* position_x, float*  position_y, float* value) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    float aux = (20 + (position_x[tid] * position_x[tid]) 
+                    + (position_y[tid] * position_y[tid]) 
+                    - 10*(cosf(2 * M_PI * position_x[tid]) 
+                    + cosf(2 * M_PI * position_y[tid])));
+    value[tid] = aux;
 }
 
-
-__global__ void init_kernel(curandState *state, long seed) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    curand_init(seed, idx, 0, state);
+__global__ void copyTwoFloatValues(float* values_from, float* values_to, int N){
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    if(tid < N){
+        float aux = values_from[tid];
+        values_to[tid] = aux;
+    }
 }
 
-
-__global__ void updateTeamBestIndex(Particula *d_particles, float *d_team_best_value, int *d_team_best_index, int particulas) {
-    *d_team_best_value = d_particles[0].best_value;
-    *d_team_best_index = 0;
-    for (int i = 1; i < particulas; i++) {
-        if (d_particles[i].best_value < *d_team_best_value) {
-            *d_team_best_value = d_particles[i].best_value;
-            *d_team_best_index = i;
+__global__ void updateBestGlobal(float* personal_best, float* global_best, int* global_best_index, int parts_qty) {
+    *global_best = 10;
+    *global_best_index = 5;
+    for (int i = 1; i < parts_qty-1; i++) {
+        if (personal_best[i] < *global_best) {
+            *global_best = personal_best[i];
+            *global_best_index = i;
         }
     }
 }
 
-
-__global__ void updateVelocity(Particula* d_particles, int *d_team_best_index, float w, float c_ind, float c_team, int particulas, curandState *state) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx < particulas) {
-        float r_ind = curand_uniform(state);
-        float r_team = curand_uniform(state);
-        d_particles[idx].velocity.x = w * d_particles[idx].velocity.x +
-                       r_ind * c_ind * (d_particles[idx].best_position.x - d_particles[idx].current_position.x) +
-                       r_team * c_team * (d_particles[*d_team_best_index].best_position.x - d_particles[idx].current_position.x);
-        d_particles[idx].velocity.y = w * d_particles[idx].velocity.y +
-                       r_ind * c_ind * (d_particles[idx].best_position.y - d_particles[idx].current_position.y) +
-                       r_team * c_team * (d_particles[*d_team_best_index].best_position.y - d_particles[idx].current_position.y);
-    }
-}
+int main() {
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (parts_qty + threadsPerBlock - 1) / threadsPerBlock;
 
 
-__global__ void updatePosition(Particula *d_particles, int particulas) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx < particulas) {
-        d_particles[idx].current_position += d_particles[idx].velocity;
-        float newValue = calcValue(d_particles[idx].current_position);
-        if (newValue < d_particles[idx].best_value) {
-            d_particles[idx].best_value = newValue;
-            d_particles[idx].best_position = d_particles[idx].current_position;
-        }
-    }
-}
+    Particle particle;
 
 
+    particle.current_position_inx = new float[parts_qty];
+    particle.current_position_iny = new float[parts_qty];
+    particle.best_position_inx = new float[parts_qty];
+    particle.best_position_iny = new float[parts_qty];
+    particle.velocity_inx = new float[parts_qty];
+    particle.velocity_iny = new float[parts_qty];
+    particle.current_value = new float[parts_qty];
+    particle.pBest = new float[parts_qty];
+    float gBest;
+    int gBestIndex;
 
 
-int main(void) {
+    float* d_current_position_inx;
+    float* d_current_position_iny;
+    float* d_best_position_inx;
+    float* d_best_position_iny;
+    float* d_velocity_inx;
+    float* d_velocity_iny;
+    float* d_current_value;
+    float* d_pBest;
+    float* d_gBest;
+    int* d_gBestIndex;
 
 
-    long start = std::clock();
+    cudaMalloc((void**)&d_current_position_inx, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_current_position_iny, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_best_position_inx, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_best_position_iny, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_velocity_inx, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_velocity_iny, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_current_value, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_pBest, parts_qty * sizeof(float));
+    cudaMalloc((void**)&d_gBest, sizeof(float));
+    cudaMalloc((void**)&d_gBestIndex, sizeof(int));
 
 
-    std::srand(std::time(NULL));
-    curandState *state;
-    cudaMalloc(&state, sizeof(curandState));
-    init_kernel<<<1,1>>>(state, clock());
+    initializeRandomPositions<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx, 
+                                                                    d_current_position_iny, 
+                                                                    d_velocity_inx, 
+                                                                    d_velocity_iny,
+                                                                    d_best_position_inx,
+                                                                    d_best_position_iny, 
+                                                                    time(NULL), 
+                                                                    min_range_value, max_range_value,
+                                                                    parts_qty);
+
+    evalFunct<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx, 
+                                                    d_current_position_iny, 
+                                                    d_current_value);
+
+    copyTwoFloatValues<<<blocksPerGrid, threadsPerBlock>>>(d_current_value, d_pBest, parts_qty);
+
+    updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
+
+    
+    cudaMemcpy(&gBest, d_gBest, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&gBestIndex, d_gBestIndex, sizeof(int), cudaMemcpyDeviceToHost);
 
 
-
-
-    Particula* h_particles = new Particula[particulas];
-    Particula* d_particles;  
-
-
-    for (int i = 0; i < particulas; i++) {
-        h_particles[i].current_position.x = randomFloat(SEARCH_MIN, SEARCH_MAX);
-        h_particles[i].current_position.y = randomFloat(SEARCH_MIN, SEARCH_MAX);
-        h_particles[i].best_position.x = h_particles[i].current_position.x;
-        h_particles[i].best_position.y = h_particles[i].current_position.y;
-        h_particles[i].best_value = calcValue(h_particles[i].best_position);
-   
-        h_particles[i].velocity.x = randomFloat(SEARCH_MIN, SEARCH_MAX);
-        h_particles[i].velocity.y = randomFloat(SEARCH_MIN, SEARCH_MAX);
-    }
-
-
-    size_t particleSize = sizeof(Particula) * particulas;
-    cudaMalloc((void **)&d_particles, particleSize);
-    cudaMemcpy(d_particles, h_particles, particleSize, cudaMemcpyHostToDevice); // dest, source, size, direction
-
-
-
-
-    int *d_team_best_index;
-    float *d_team_best_value;
-
-
-    cudaMalloc((void **)&d_team_best_index, sizeof(int));
-    cudaMalloc((void **)&d_team_best_value, sizeof(float));
-
-
-    updateTeamBestIndex<<<1,1>>>(d_particles, d_team_best_value, d_team_best_index, particulas);
-
-
-    int blockSize = 1024;
-    int gridSize = (particulas + blockSize - 1) / blockSize;
+    std::cout << "Global best: "<< gBest << " "; 
+    std::cout << std::endl;
+    std::cout << "Global best index: "<< gBestIndex << " "; 
+    std::cout << std::endl;
 
 
 
+    delete[] particle.current_position_inx;
+    delete[] particle.current_position_iny;
+    delete[] particle.velocity_inx;
+    delete[] particle.velocity_iny;
+    delete[] particle.current_value;
+    delete[] particle.pBest;
 
-    for (int i = 0; i < ITERATIONS; i++) {
-        updateVelocity<<<gridSize, blockSize>>>(d_particles, d_team_best_index, w, c_ind, c_team, particulas, state);
-        updatePosition<<<gridSize, blockSize>>>(d_particles, particulas);
-        updateTeamBestIndex<<<1,1>>>(d_particles, d_team_best_value, d_team_best_index, particulas);
-    }
+    cudaFree(d_current_position_inx);
+    cudaFree(d_current_position_iny);
+    cudaFree(d_best_position_inx);
+    cudaFree(d_best_position_iny);
+    cudaFree(d_velocity_inx);
+    cudaFree(d_velocity_iny);
+    cudaFree(d_current_value);
+    cudaFree(d_pBest);
+    cudaFree(d_gBest);
+    cudaFree(d_gBestIndex);
 
-
-    int team_best_index;
-    cudaMemcpy(&team_best_index, d_team_best_index, sizeof(int), cudaMemcpyDeviceToHost);
-   
-    cudaMemcpy(h_particles, d_particles, particleSize, cudaMemcpyDeviceToHost);
-
-
-    long stop = std::clock();
-    long elapsed = (stop - start) * 1000 / CLOCKS_PER_SEC;
-
-
-    // print results
-
-
-    std::cout << "Valor Optimo: " << h_particles[team_best_index].best_value << std::endl;
-    std::cout << "Posicion del Valor: " << h_particles[team_best_index].best_position.toString() << std::endl;
-   
-    std::cout << "Run time: " << elapsed << "ms" << std::endl;
-
-
-    cudaFree(d_particles);
-    cudaFree(d_team_best_index);
-    cudaFree(d_team_best_value);
-    cudaFree(state);
     return 0;
 }
