@@ -3,9 +3,9 @@
 #include <cmath>
 #include <string>
 #include <ctime>
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <curand_kernel.h>
+//#include <cuda.h>
+//#include <cuda_runtime.h>
+//#include <curand_kernel.h>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif

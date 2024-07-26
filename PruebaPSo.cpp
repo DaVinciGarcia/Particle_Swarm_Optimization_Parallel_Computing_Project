@@ -52,7 +52,6 @@ float randomFloat(float low, float high) {
 }
 
 float evalFunct(Position p) {
-    //return (p.x * p.x - 10 * cosf(2 * M_PI * p.x)) + (p.y * p.y - 10 * cosf(2 * M_PI * p.y));
     return (20 + (p.x * p.x) + (p.y * p.y) - 10*(cosf(2 * M_PI * p.x) + cosf(2 * M_PI * p.y)));
 }
 
@@ -90,8 +89,6 @@ void updatePosition(Particula &p) {
         p.pBest = p.current_position;
     }
 }
-
-
 
 
 int main(void) {
@@ -136,11 +133,8 @@ int main(void) {
 
     long stop = std::clock();
     long elapsed = (stop - start) * 1000 / CLOCKS_PER_SEC;
-
-
  
     std::cout << "Valor Optimo: " << team_best_value << std::endl;
-    //std::cout << "Posicion del Valor: " << team_best_position.toString() << std::endl;
     std::cout << "Tiempo de Ejecucion: " << elapsed << "ms" << std::endl;
     return 0;
 }
