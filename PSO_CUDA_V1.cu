@@ -1,6 +1,11 @@
-#include <curand_kernel.h>
-#include <cuda_runtime.h>
 #include <iostream>
+#include <stdlib.h>
+#include <cmath> 
+#include <string>
+#include <ctime> 
+#include <cuda.h> 
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -26,6 +31,11 @@ struct Particle {
     float* current_value;
     float* pBest;
 };
+
+__device__  float calcFunct(float pos_x, float pos_y){
+    return (20 + (pos_x * pos_x) + (pos_y * pos_y) - 
+    10*(cosf(2 * M_PI * pos_x)  + cosf(2 * M_PI * pos_y)));
+}
 
 __global__ void initializeRandomPositions(float* position_x, 
                                             float* position_y, 
@@ -72,13 +82,68 @@ __global__ void copyTwoFloatValues(float* values_from, float* values_to, int N){
     }
 }
 
-__global__ void updateBestGlobal(float* personal_best, float* global_best, int* global_best_index, int parts_qty) {
+__global__ void updateBestGlobal(float* personal_best, 
+                                    float* global_best, 
+                                    int* global_best_index, 
+                                    int parts_qty) {
     *global_best = 10;
     *global_best_index = 5;
     for (int i = 1; i < parts_qty-1; i++) {
         if (personal_best[i] < *global_best) {
             *global_best = personal_best[i];
             *global_best_index = i;
+        }
+    }
+}
+
+__global__ void updateVelocity(float* d_current_position_inx,
+                                float* d_current_position_iny,
+                                float* d_best_position_inx,
+                                float* d_best_position_iny,
+                                float* d_velocity_inx,
+                                float* d_velocity_iny,
+                                int *d_team_best_index, 
+                                float w, float c1, float c2, 
+                                int parts_qty, curandState *state) {
+
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < parts_qty) {
+        float r_ind = curand_uniform(state);
+        float r_team = curand_uniform(state);
+        d_velocity_inx[idx] = w * d_velocity_inx[idx] +
+                       r_ind * c1 * (d_best_position_inx[idx] - 
+                        d_current_position_inx[idx]) +
+                       r_team * c2 * (d_best_position_inx[*d_team_best_index] - 
+                        d_current_position_inx[idx]);
+
+        d_velocity_iny[idx] = w * d_velocity_iny[idx] +
+                        r_ind * c1 * (d_best_position_iny[idx] - 
+                         d_current_position_iny[idx]) +
+                        r_team * c2 * (d_best_position_iny[*d_team_best_index] - 
+                         d_current_position_iny[idx]);
+    }
+}
+
+
+__global__ void updatePosition(float* d_current_position_inx,
+                                float* d_current_position_iny,
+                                float* d_best_position_inx,
+                                float* d_best_position_iny,
+                                float* d_velocity_inx,
+                                float* d_velocity_iny,
+                                float* d_pBest,
+                                int parts_qty) {
+
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < parts_qty) {
+        d_current_position_inx[idx] += d_velocity_inx[idx];
+        d_current_position_iny[idx] += d_velocity_iny[idx];
+
+        float newValue = calcFunct(d_current_position_inx[idx], d_current_position_iny[idx]);
+        if (newValue < d_pBest[idx]) {
+            d_pBest[idx] = newValue;
+            d_best_position_inx[idx] = d_current_position_inx[idx];
+            d_best_position_iny[idx] = d_current_position_iny[idx];
         }
     }
 }
@@ -113,7 +178,7 @@ int main() {
     float* d_pBest;
     float* d_gBest;
     int* d_gBestIndex;
-
+    curandState *state;
 
     cudaMalloc((void**)&d_current_position_inx, parts_qty * sizeof(float));
     cudaMalloc((void**)&d_current_position_iny, parts_qty * sizeof(float));
@@ -125,6 +190,7 @@ int main() {
     cudaMalloc((void**)&d_pBest, parts_qty * sizeof(float));
     cudaMalloc((void**)&d_gBest, sizeof(float));
     cudaMalloc((void**)&d_gBestIndex, sizeof(int));
+    cudaMalloc(&state, sizeof(curandState));
 
 
     initializeRandomPositions<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx, 
@@ -142,15 +208,42 @@ int main() {
                                                     d_current_value);
 
     copyTwoFloatValues<<<blocksPerGrid, threadsPerBlock>>>(d_current_value, d_pBest, parts_qty);
-
-    updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
-
     
+    updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
+    
+    for (int i = 0; i < iterations; i++) {
+        updateVelocity<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx,
+                                                            d_current_position_iny,
+                                                            d_best_position_inx,
+                                                            d_best_position_iny,
+                                                            d_velocity_inx,
+                                                            d_velocity_iny,
+                                                            d_gBestIndex, 
+                                                            w, c1, c2, 
+                                                            parts_qty, 
+                                                            state);
+                                                            
+        updatePosition<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx,
+                                                            d_current_position_iny,
+                                                            d_best_position_inx,
+                                                            d_best_position_iny,
+                                                            d_velocity_inx,
+                                                            d_velocity_iny,
+                                                            d_pBest,
+                                                            parts_qty);
+        
+        updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
+    }
+
     cudaMemcpy(&gBest, d_gBest, sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(&gBestIndex, d_gBestIndex, sizeof(int), cudaMemcpyDeviceToHost);
-
+    cudaMemcpy(particle.best_position_inx, d_best_position_inx, sizeof(float)*parts_qty, cudaMemcpyDeviceToHost);
+    cudaMemcpy(particle.best_position_iny, d_best_position_iny, sizeof(float)*parts_qty, cudaMemcpyDeviceToHost);
 
     std::cout << "Global best: "<< gBest << " "; 
+    std::cout << std::endl;
+    std::cout << "Global Best Position: ("<< particle.best_position_inx[gBestIndex] << ", " 
+                << particle.best_position_iny[gBestIndex] << ")"; 
     std::cout << std::endl;
     std::cout << "Global best index: "<< gBestIndex << " "; 
     std::cout << std::endl;
