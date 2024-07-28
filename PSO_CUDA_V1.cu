@@ -86,8 +86,8 @@ __global__ void updateBestGlobal(float* personal_best,
                                     float* global_best, 
                                     int* global_best_index, 
                                     int parts_qty) {
-    *global_best = 10;
-    *global_best_index = 5;
+    *global_best = personal_best[0];
+    *global_best_index = 0;
     for (int i = 1; i < parts_qty-1; i++) {
         if (personal_best[i] < *global_best) {
             *global_best = personal_best[i];
