@@ -110,16 +110,17 @@ __global__ void reduceMin(float* input, float* output, int* outputIndex, int n) 
     }
 }
 
-__global__ void updateBestGlobal(float* personal_best, 
-                                 float* global_best, 
-                                 int* global_best_index, 
-                                 int parts_qty) {
+__global__ void updateBestGlobal(float* personal_best,
+                                    int* bests_index,
+                                    float* global_best, 
+                                    int* global_best_index, 
+                                    int blocks) {
     *global_best = personal_best[0];
-    *global_best_index = 0;
-    for (int i = 1; i < parts_qty; i++) {
+    *global_best_index = bests_index[0];
+    for (int i = 1; i < blocks; i++) {
         if (personal_best[i] < *global_best) {
+            *global_best_index = bests_index[i];
             *global_best = personal_best[i];
-            *global_best_index = i;
         }
     }
 }
@@ -185,8 +186,8 @@ int main() {
     particle.pBest = new float[parts_qty];
     float gBest;
     int gBestIndex;
-    int h_best_global_indexes[blocksPerGrid];
-    float h_best_global[blocksPerGrid];
+    int h_bests_global_indexes[blocksPerGrid];
+    float h_bests_global[blocksPerGrid];
     size_t sharedMemSize = threadsPerBlock * sizeof(float) + threadsPerBlock * sizeof(int);
 
     float* d_current_position_inx;
@@ -233,10 +234,8 @@ int main() {
                                                   d_current_value);
     cudaDeviceSynchronize();
 
+    // For initialize pBest = F(x,y)
     copyTwoFloatValues<<<blocksPerGrid, threadsPerBlock>>>(d_current_value, d_pBest, parts_qty);
-    cudaDeviceSynchronize();
-
-    updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
     cudaDeviceSynchronize();
 
     reduceMin<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
@@ -244,13 +243,33 @@ int main() {
                                                                  d_blocks_global_bests_index, 
                                                                  parts_qty);
     cudaDeviceSynchronize();
+    
+    cudaMemcpy(h_bests_global, d_blocks_global_bests, blocksPerGrid * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_bests_global_indexes, d_blocks_global_bests_index, blocksPerGrid * sizeof(int), cudaMemcpyDeviceToHost);
+    
+    // for (int k = 0; k < blocksPerGrid; k++) {
+    //     std::cout << "Block " << k << " best value: " << h_bests_global[k] << ", index: " << h_bests_global_indexes[k] << std::endl;
+    // }
 
-    cudaMemcpy(h_best_global, d_blocks_global_bests, blocksPerGrid * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_best_global_indexes, d_blocks_global_bests_index, blocksPerGrid * sizeof(int), cudaMemcpyDeviceToHost);
+    //returns gBest and its index
+    updateBestGlobal<<<1,1>>>(d_blocks_global_bests,
+                                d_blocks_global_bests_index, 
+                                d_gBest, 
+                                d_gBestIndex, 
+                                blocksPerGrid);
 
-    for (int k = 0; k < blocksPerGrid; k++) {
-        std::cout << "Block " << k << " best value: " << h_best_global[k] << ", index: " << h_best_global_indexes[k] << std::endl;
-    }
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(&gBest, d_gBest, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&gBestIndex, d_gBestIndex, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(particle.best_position_inx, d_best_position_inx, sizeof(float)*parts_qty, cudaMemcpyDeviceToHost);
+    cudaMemcpy(particle.best_position_iny, d_best_position_iny, sizeof(float)*parts_qty, cudaMemcpyDeviceToHost);
+    
+    // std::cout << "After UpdateBestGlobal<<1,1>>: " <<  std::endl;
+    // std::cout << "Global best: " << std::fixed << std::setprecision(5) << gBest << std::endl;
+    // std::cout << "Global best index: " << std::fixed << std::setprecision(5) << gBestIndex << std::endl;
+    // std::cout << "Global Best Position: (" << std::fixed << std::setprecision(5) << particle.best_position_inx[gBestIndex] << ", " 
+    //           << particle.best_position_iny[gBestIndex] << ")" << std::endl;
 
     for (int i = 0; i < iterations; i++) {
         updateVelocity<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx,
@@ -275,18 +294,36 @@ int main() {
                                                            parts_qty);
         cudaDeviceSynchronize();
 
-        updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
+        reduceMin<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+            d_blocks_global_bests, 
+            d_blocks_global_bests_index, 
+            parts_qty);
         cudaDeviceSynchronize();
+
+        updateBestGlobal<<<1,1>>>(d_blocks_global_bests,
+                                    d_blocks_global_bests_index, 
+                                    d_gBest, 
+                                    d_gBestIndex, 
+                                    blocksPerGrid);
+        cudaDeviceSynchronize();
+
     }
+
 
     cudaMemcpy(&gBest, d_gBest, sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(&gBestIndex, d_gBestIndex, sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(particle.best_position_inx, d_best_position_inx, sizeof(float)*parts_qty, cudaMemcpyDeviceToHost);
     cudaMemcpy(particle.best_position_iny, d_best_position_iny, sizeof(float)*parts_qty, cudaMemcpyDeviceToHost);
 
-    std::cout << "Global best: " << std::fixed << std::setprecision(5) << gBest << std::endl;
-    std::cout << "Global Best Position: (" << std::fixed << std::setprecision(5) << particle.best_position_inx[gBestIndex] << ", " 
-              << particle.best_position_iny[gBestIndex] << ")" << std::endl;
+    std::cout << "Global best: "<< gBest << " "; 
+    std::cout << std::endl;
+    std::cout << "Global Best Position: ("<< particle.best_position_inx[gBestIndex] << ", " 
+                << particle.best_position_iny[gBestIndex] << ")"; 
+    std::cout << std::endl;
+    std::cout << "Global best index: "<< gBestIndex << " "; 
+    std::cout << std::endl;
+
+
 
     delete[] particle.current_position_inx;
     delete[] particle.current_position_iny;
