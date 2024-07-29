@@ -10,7 +10,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-const unsigned int parts_qty = 1000;
+const unsigned int parts_qty = 100000;
 const unsigned int iterations = 1000;
 const float min_range_value = -5.12f;
 const float max_range_value = 5.12f;
@@ -192,6 +192,12 @@ int main() {
     cudaMalloc((void**)&d_gBestIndex, sizeof(int));
     cudaMalloc(&state, sizeof(curandState));
 
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    // Registrar evento de inicio
+    cudaEventRecord(start);
 
     initializeRandomPositions<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx, 
                                                                     d_current_position_iny, 
@@ -235,6 +241,16 @@ int main() {
         updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
     }
 
+    // Registrar evento de parada
+    cudaEventRecord(stop);
+
+    // Esperar a que el evento de parada complete
+    cudaEventSynchronize(stop);
+
+    // Calcular el tiempo de ejecución
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
     cudaMemcpy(&gBest, d_gBest, sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(&gBestIndex, d_gBestIndex, sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(particle.best_position_inx, d_best_position_inx, sizeof(float)*parts_qty, cudaMemcpyDeviceToHost);
@@ -247,7 +263,7 @@ int main() {
     std::cout << std::endl;
     std::cout << "Global best index: "<< gBestIndex << " "; 
     std::cout << std::endl;
-
+    std::cout << "Tiempo de ejecucion del kernel: " << milliseconds << " ms" << std::endl;
 
 
     delete[] particle.current_position_inx;
