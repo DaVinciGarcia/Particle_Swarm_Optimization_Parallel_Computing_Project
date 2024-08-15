@@ -11,7 +11,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-const unsigned int parts_qty = 100000;
+const unsigned int parts_qty = 7500;
 const unsigned int iterations = 1000;
 const float min_range_value = -5.12f;
 const float max_range_value = 5.12f;
@@ -39,6 +39,46 @@ struct Particle {
 __device__ float calcFunct(float pos_x, float pos_y) {
     return (20 + (pos_x * pos_x) + (pos_y * pos_y) - 
             10 * (cosf(2 * M_PI * pos_x) + cosf(2 * M_PI * pos_y)));
+}
+
+template <unsigned int blockSize>
+__device__ void warpReduce(volatile float* sdata, volatile int* sindex, int tid) {
+    if (blockSize >= 64) {
+        if (sdata[tid] > sdata[tid + 32]) {
+            sdata[tid] = sdata[tid + 32];
+            sindex[tid] = sindex[tid + 32];
+        }
+    }
+    if (blockSize >= 32) {
+        if (sdata[tid] > sdata[tid + 16]) {
+            sdata[tid] = sdata[tid + 16];
+            sindex[tid] = sindex[tid + 16];
+        }
+    }
+    if (blockSize >= 16) {
+        if (sdata[tid] > sdata[tid + 8]) {
+            sdata[tid] = sdata[tid + 8];
+            sindex[tid] = sindex[tid + 8];
+        }
+    }
+    if (blockSize >= 8) {
+        if (sdata[tid] > sdata[tid + 4]) {
+            sdata[tid] = sdata[tid + 4];
+            sindex[tid] = sindex[tid + 4];
+        }
+    }
+    if (blockSize >= 4) {
+        if (sdata[tid] > sdata[tid + 2]) {
+            sdata[tid] = sdata[tid + 2];
+            sindex[tid] = sindex[tid + 2];
+        }
+    }
+    if (blockSize >= 2) {
+        if (sdata[tid] > sdata[tid + 1]) {
+            sdata[tid] = sdata[tid + 1];
+            sindex[tid] = sindex[tid + 1];
+        }
+    }
 }
 
 __global__ void initializeRandomPositions(float* position_x, 
@@ -78,24 +118,38 @@ __global__ void copyTwoFloatValues(float* values_from, float* values_to, int N) 
     }
 }
 
+template <unsigned int blockSize>
 __global__ void reduceMin(float* input, float* output, int* outputIndex, int n) {
     extern __shared__ float sdata[];
     int* sindex = (int*)&sdata[blockDim.x];
 
     unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int i = blockIdx.x * (blockSize * 2) + threadIdx.x;
+    unsigned int gridSize = blockSize * 2 * gridDim.x;
 
-    if (i < n) {
-        sdata[tid] = input[i];
-        sindex[tid] = i;
-    } else {
-        sdata[tid] = FLT_MAX;
-        sindex[tid] = -1;
+    sdata[tid] = FLT_MAX;
+    sindex[tid] = -1;
+
+    while (i < n) {
+        float val1 = input[i];
+        float val2 = (i + blockSize < n) ? input[i + blockSize] : FLT_MAX;
+
+        if (val1 < sdata[tid]) {
+            sdata[tid] = val1;
+            sindex[tid] = i;
+        }
+        if (val2 < sdata[tid]) {
+            sdata[tid] = val2;
+            sindex[tid] = i + blockSize;
+        }
+
+        i += gridSize;
     }
     __syncthreads();
 
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s && i + s < n) {
+    // La reducción final dentro de la memoria compartida
+    for (unsigned int s = blockSize / 2; s > 32; s >>= 1) {
+        if (tid < s) {
             if (sdata[tid] > sdata[tid + s]) {
                 sdata[tid] = sdata[tid + s];
                 sindex[tid] = sindex[tid + s];
@@ -104,11 +158,14 @@ __global__ void reduceMin(float* input, float* output, int* outputIndex, int n) 
         __syncthreads();
     }
 
+    if (tid < 32) warpReduce<blockSize>(sdata, sindex, tid);
+
     if (tid == 0) {
         output[blockIdx.x] = sdata[0];
         outputIndex[blockIdx.x] = sindex[0];
     }
 }
+
 
 __global__ void updateBestGlobal(float* personal_best,
                                     int* bests_index,
@@ -222,7 +279,7 @@ int main() {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    // Register start event
+    // Registrar evento de inicio
     cudaEventRecord(start);
 
     initializeRandomPositions<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx, 
@@ -245,10 +302,60 @@ int main() {
     copyTwoFloatValues<<<blocksPerGrid, threadsPerBlock>>>(d_current_value, d_pBest, parts_qty);
     cudaDeviceSynchronize();
 
-    reduceMin<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
-                                                                 d_blocks_global_bests, 
-                                                                 d_blocks_global_bests_index, 
-                                                                 parts_qty);
+
+    switch (threadsPerBlock)
+    {
+    case 512:
+        reduceMin<512><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 256:
+        reduceMin<256><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 128:
+        reduceMin<128><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 64:
+        reduceMin< 64><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 32:
+        reduceMin< 32><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 16:
+        reduceMin< 16><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 8:
+        reduceMin< 8><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 4:
+        reduceMin< 4><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 2:
+        reduceMin< 2><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    case 1:
+        reduceMin< 1><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                            d_blocks_global_bests, 
+                                                                            d_blocks_global_bests_index, 
+                                                                            parts_qty); break;
+    }
     cudaDeviceSynchronize();
     
     cudaMemcpy(h_bests_global, d_blocks_global_bests, blocksPerGrid * sizeof(float), cudaMemcpyDeviceToHost);
@@ -301,10 +408,59 @@ int main() {
                                                            parts_qty);
         cudaDeviceSynchronize();
 
-        reduceMin<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
-            d_blocks_global_bests, 
-            d_blocks_global_bests_index, 
-            parts_qty);
+        switch (threadsPerBlock)
+        {
+        case 512:
+            reduceMin<512><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 256:
+            reduceMin<256><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 128:
+            reduceMin<128><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 64:
+            reduceMin< 64><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 32:
+            reduceMin< 32><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 16:
+            reduceMin< 16><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 8:
+            reduceMin< 8><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 4:
+            reduceMin< 4><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 2:
+            reduceMin< 2><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        case 1:
+            reduceMin< 1><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_pBest, 
+                                                                                d_blocks_global_bests, 
+                                                                                d_blocks_global_bests_index, 
+                                                                                parts_qty); break;
+        }
         cudaDeviceSynchronize();
 
         updateBestGlobal<<<1,1>>>(d_blocks_global_bests,
@@ -316,13 +472,13 @@ int main() {
 
     }
 
-    // Tegister Stop Event
+    // Registrar evento de parada
     cudaEventRecord(stop);
 
-    // Wait until Event Stop is recorded
+    // Esperar a que el evento de parada complete
     cudaEventSynchronize(stop);
 
-    // Compute execution time
+    // Calcular el tiempo de ejecución
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 

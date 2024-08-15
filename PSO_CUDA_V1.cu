@@ -3,7 +3,7 @@
 #include <cmath> 
 #include <string>
 #include <ctime> 
-#include <cuda.h> 
+#include <cuda.h>
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #ifndef M_PI
@@ -196,7 +196,7 @@ int main() {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    // Registrar evento de inicio
+    // Register star event
     cudaEventRecord(start);
 
     initializeRandomPositions<<<blocksPerGrid, threadsPerBlock>>>(d_current_position_inx, 
@@ -241,13 +241,13 @@ int main() {
         updateBestGlobal<<<1,1>>>(d_pBest, d_gBest, d_gBestIndex, parts_qty);
     }
 
-    // Registrar evento de parada
+    // Registrar stop event
     cudaEventRecord(stop);
 
-    // Esperar a que el evento de parada complete
+    // Wait until Stop event is complete
     cudaEventSynchronize(stop);
 
-    // Calcular el tiempo de ejecución
+    // Compute execution time
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
